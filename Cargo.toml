@@ -1,0 +1,7 @@
+[package]
+name = "sexpr"
+version = "0.1.0"
+authors = ["Lars T Hansen <lth@acm.org>"]
+
+[dependencies]
+unicode_reader = "0.1.1"

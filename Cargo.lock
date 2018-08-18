@@ -1,0 +1,23 @@
+[[package]]
+name = "sexpr"
+version = "0.1.0"
+dependencies = [
+ "unicode_reader 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "unicode-segmentation"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "unicode_reader"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+dependencies = [
+ "unicode-segmentation 1.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[metadata]
+"checksum unicode-segmentation 1.2.1 (registry+https://github.com/rust-lang/crates.io-index)" = "aa6024fc12ddfd1c6dbc14a80fa2324d4568849869b779f6bd37e5e4c03344d1"
+"checksum unicode_reader 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)" = "001b27e8f5e9da465b3584051a3a3d2ebefee4f8595c49e96cc1deec9667e4cc"
