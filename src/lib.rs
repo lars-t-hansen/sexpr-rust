@@ -1,17 +1,17 @@
 // Simple S-expression reader.
 
-extern crate unicode_reader;
-
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::str::FromStr;
 
-use unicode_reader::CodePoints;
+// TODO: very likely, Pair wants to be Rc<> and Vector wants to have
+// Rc<> wrapped around it, so that it's possible to create DAGs /
+// share data in various ways when processing the s-expression.
 
 pub type Pair = Box<(Datum, Datum)>;
 pub type Symbol = Rc<SymValue>;
 
-#[derive(Clone)]
+#[derive(Clone,Debug)]
 pub enum Datum
 {
     Cons(Pair),
@@ -25,9 +25,23 @@ pub enum Datum
     Nil
 }
 
-type Input = Iterator<Item = std::io::Result<char>>;
+impl Datum {
+    // TODO: One can argue about this, given that 1.0 != 1 due to representations...
+    
+    pub fn eqv(a: &Datum, b:&Datum) -> bool {
+        match (a, b) {
+            (Datum::Nil, Datum::Nil) => true,
+            (Datum::Flo(x), Datum::Flo(y)) => x == y,
+            (Datum::Fix(x), Datum::Fix(y)) => x == y,
+            (Datum::Bool(x), Datum::Bool(y)) => x == y,
+            (Datum::Chr(x), Datum::Chr(y)) => x == y,
+            (Datum::Sym(ref x), Datum::Sym(ref y)) => Rc::ptr_eq(x, y),
+            _ => false
+        }
+    }
+}
 
-// To compare symbols, use ptr_eq()
+#[derive(Debug)]
 pub struct SymValue
 {
     name: String
@@ -35,108 +49,89 @@ pub struct SymValue
 
 pub struct Symtab
 {
-    table:   HashMap<String, Symbol>,
-    quote:   Symbol
+    table:     HashMap<String, Symbol>,
+    pub quote: Datum,
+    pub dot:   Datum
 }
 
-const OOB : char = '\0';
-
-pub fn make_symtab() -> Symtab
+impl Symtab
 {
-    let mut table = HashMap::new();
-    let quote_sym = Rc::new(SymValue { name: "quote".to_string() });
-    table.insert(quote_sym.name.clone(), Rc::clone(&quote_sym)).unwrap();
-    Symtab {
-        table:   table,
-        quote:   quote_sym
+    pub fn new() -> Symtab
+    {
+        let mut table = HashMap::new();
+
+        let quote_sym = Rc::new(SymValue { name: "quote".to_string() });
+        table.insert(quote_sym.name.clone(), Rc::clone(&quote_sym));
+
+        let dot_sym = Rc::new(SymValue { name: ".".to_string() });
+        table.insert(dot_sym.name.clone(), Rc::clone(&dot_sym));
+
+        Symtab {
+            table:   table,
+            quote:   Datum::Sym(quote_sym),
+            dot:     Datum::Sym(dot_sym)
+        }
+    }
+
+    pub fn intern(&mut self, name:String) -> Symbol
+    {
+        if let Some(s) = self.table.get(&name) {
+            return Rc::clone(s);
+        }
+
+        let sym = Rc::new(SymValue { name: name.clone() });
+        self.table.insert(name, Rc::clone(&sym));
+        sym
     }
 }
 
-pub fn test(syms:&mut Symtab) -> Option<Datum>
-{
-    let mut input_ = CodePoints::from(std::io::stdin());
-    let mut input = Parser {
-        c0: OOB,
-        c1: OOB,
-        input: &mut input_,
-        syms: syms
-    };
-    input.parse()
-}
+// TODO: allow user to control whether dotted pairs is a thing, for
+// some applications they are not desirable.  In this case, the dot
+// syntax should be recognized but rejected.
+//
+// TODO: error reporting, including line number of error.
 
-struct Parser<'a> {
+pub type Input = Iterator<Item = std::io::Result<char>>;
+
+pub struct Parser<'a> {
     c0: char,
-    c1: char,
     input: &'a mut Input,
     syms: &'a mut Symtab
 }
     
+const OOB : char = '\0';
+
 impl<'a> Parser<'a>
 {
-    fn parse(&mut self) -> Option<Datum>
+    pub fn new(input: &'a mut Input, symtab: &'a mut Symtab) -> Parser<'a>
+    {
+        let mut parser = Parser {
+            c0: OOB,
+            input: input,
+            syms: symtab
+        };
+        parser.next();
+        parser
+    }
+
+    pub fn parse(&mut self) -> Option<Datum>
     {
         self.eat_whitespace_and_comment();
         if self.peek() == OOB { None } else { Some(self.parse_datum()) }
     }
     
-    fn eat_whitespace_and_comment(&mut self)
-    {
-        loop {
-            match self.peek() {
-                ' ' | '\t' | '\r' | '\n'
-                    => { self.next(); }
-                ';'
-                    => { self.next();
-                         loop {
-                             match self.peek() {
-                                 OOB | '\r' | '\n' => { break; }
-                                 _                 => { self.next() }
-                             }
-                         }
-                    }
-                _
-                    => { return; }
-            }
-        }
-    }
-
-    fn eat_digits(&mut self, s:&mut String, mut musthave: bool)
-    {
-        loop {
-            if !is_digit(self.peek()) {
-                if musthave {
-                    panic!("Expected at least one digit");
-                }
-                break;
-            }
-            musthave = false;
-            s.push(self.get());
-        }
-    }
-    
+    // Precondition: we have just called eat_whitespace_and_comment().
     fn parse_datum(&mut self) -> Datum
     {
-        loop {
-            self.eat_whitespace_and_comment();
-            match self.peek() {
-                OOB  => { panic!("Unexpected EOF") }
-                '('  => { return self.parse_list(); }
-                '#'  => { return self.parse_sharp(); }
-                '"'  => { return self.parse_string(); }
-                '\'' => { return self.parse_quote(); }
-                c    => {
-                    if is_number_initial(c) {
-                        return self.parse_number();
-                    }
-                    if is_symbol_initial(c) {
-                        return self.parse_symbol();
-                    }
-                    if c == '.' && is_digit(self.peek2()) {
-                        return self.parse_number();
-                    }
-                    panic!("Unknown");
-                }
-            }
+        return match self.peek() {
+            OOB  => panic!("Unexpected EOF"),
+            '('  => self.parse_list(),
+            '#'  => self.parse_sharp(),
+            '"'  => self.parse_string(),
+            '\'' => self.parse_quote(),
+            c if is_symbol_or_number_initial(c)
+                 => self.parse_symbol_or_number(),
+            _    => panic!("Unknown character {}", self.peek())
         }
     }
 
@@ -151,14 +146,14 @@ impl<'a> Parser<'a>
             if self.peek() == ')' {
                 break;
             }
-            if self.peek() == '.' {
-                self.next();
+            let datum = self.parse_datum();
+            if Datum::eqv(&datum, &self.syms.dot) {
                 self.eat_whitespace_and_comment();
                 last = self.parse_datum();
                 self.eat_whitespace_and_comment();
                 break;
             }
-            data.push(self.parse_datum());
+            data.push(datum);
         }
         self.must_eat(')');
 
@@ -189,8 +184,9 @@ impl<'a> Parser<'a>
     fn parse_quote(&mut self) -> Datum
     {
         self.must_eat('\'');
+        self.eat_whitespace_and_comment();
         let d = self.parse_datum();
-        cons(Datum::Sym(Rc::clone(&self.syms.quote)), cons(d, Datum::Nil))
+        cons(self.syms.quote.clone(), cons(d, Datum::Nil))
     }
 
     fn parse_sharp(&mut self) -> Datum
@@ -227,69 +223,50 @@ impl<'a> Parser<'a>
         Datum::Str(s)
     }
 
-    // TODO: Really not right; we should parse a char sequence and then decide
-    // whether it's a number or a symbol.  Consider "-1", currently a symbol.
-    
-    fn parse_number(&mut self) -> Datum
+    fn parse_symbol_or_number(&mut self) -> Datum
     {
-        let mut n = String::new();
-        let mut flonum = false;
-        self.eat_digits(&mut n, false);
-        if self.peek() == '.' {
-            flonum = true;
-            n.push(self.get());
-            self.eat_digits(&mut n, true);
-        }
-        if self.peek() == 'e' || self.peek() == 'E' {
-            flonum = true;
-            n.push(self.get());
-            if self.peek() == '+' || self.peek() == '-' {
-                n.push(self.get());
-            }
-            self.eat_digits(&mut n, true);
-        }
-        if flonum {
-            Datum::Flo(f64::from_str(&n).unwrap()) // Range error?
-        } else {
-            Datum::Fix(i64::from_str(&n).unwrap()) // Range error?
-        }
-    }
-
-    // TODO: Really not right; we should parse a char sequence and then decide
-    // whether it's a number or a symbol.
-    
-    fn parse_symbol(&mut self) -> Datum
-    {
-        let mut name = String::new();
+        let mut name = Vec::new();
         name.push(self.get());
-        while is_symbol_subsequent(self.peek()) {
+        while is_symbol_or_number_subsequent(self.peek()) {
             name.push(self.get());
         }
-        Datum::Sym(self.intern(name))
-    }
-
-    fn intern(&mut self, name:String) -> Symbol
-    {
-        if let Some(s) = self.syms.table.get(&name) {
-            return Rc::clone(s);
+        let (is_number, is_integer) = is_number_syntax(&name);
+        let name_str: String = name.into_iter().collect();
+        if is_number {
+            if is_integer {
+                Datum::Fix(i64::from_str(&name_str).unwrap()) // Range error?
+            } else {
+                Datum::Flo(f64::from_str(&name_str).unwrap()) // Range error?
+            }
+        } else {
+            Datum::Sym(self.syms.intern(name_str))
         }
-
-        let sym = Rc::new(SymValue { name: name.clone() });
-        self.syms.table.insert(name, Rc::clone(&sym)).unwrap();
-        sym
     }
 
-    fn peek(&mut self) -> char
+    fn eat_whitespace_and_comment(&mut self)
+    {
+        loop {
+            match self.peek() {
+                ' ' | '\t' | '\r' | '\n'
+                    => { self.next(); }
+                ';'
+                    => { self.next();
+                         loop {
+                             match self.peek() {
+                                 OOB | '\r' | '\n' => { break; }
+                                 _                 => { self.next() }
+                             }
+                         }
+                    }
+                _
+                    => { return; }
+            }
+        }
+    }
+
+    fn peek(&self) -> char
     {
         self.c0
-    }
-
-    fn peek2(&mut self) -> char
-    {
-        if self.c1 == OOB {
-            self.c1 = self.getchar();
-        }
-        self.c1
     }
 
     fn get(&mut self) -> char
@@ -301,11 +278,7 @@ impl<'a> Parser<'a>
 
     fn next(&mut self)
     {
-        self.c0 = self.c1;
-        self.c1 = OOB;
-        if self.c0 == OOB {
-            self.c0 = self.getchar();
-        }
+        self.c0 = self.getchar();
     }
 
     fn must_eat(&mut self, c:char)
@@ -334,15 +307,9 @@ fn cons(a: Datum, b: Datum) -> Datum
 fn is_digit(c:char) -> bool
 {
     match c {
-        '0'...'9'
-            => true,
-        _   => false
+        '0'...'9' => true,
+        _         => false
     }
-}
-
-fn is_number_initial(c:char) -> bool
-{
-    is_digit(c)
 }
 
 fn is_symbol_initial(c:char) -> bool
@@ -355,12 +322,79 @@ fn is_symbol_initial(c:char) -> bool
     }
 }
 
-fn is_symbol_subsequent(c:char) -> bool
+fn is_symbol_or_number_initial(c:char) -> bool
 {
-    is_symbol_initial(c) ||
-        match c {
-            '.' | '0'...'9'
-                => true,
-            _   => false
+    is_symbol_initial(c) || is_digit(c) || c == '.'
+}
+
+fn is_symbol_or_number_subsequent(c:char) -> bool
+{
+    is_symbol_initial(c) || is_digit(c) || c == '.' || c == '#'
+}
+
+fn is_number_syntax(s:&Vec<char>) -> (bool, bool)
+{
+    let mut i = 0;
+
+    macro_rules! digits {
+        () => {{
+            let p = i;
+            while i < s.len() && is_digit(s[i]) {
+                i += 1;
+            }
+            i > p
+        }}
+    }
+    macro_rules! opt_sign {
+        () => {
+            if i < s.len() && (s[i] == '+' || s[i] == '-') {
+                i += 1;
+            }
         }
+    }
+
+    opt_sign!();
+
+    let hasint = digits!();
+    let mut hasfrac = false;
+
+    if i < s.len() && s[i] == '.' {
+        i += 1;
+        hasfrac = digits!();
+        if !hasfrac {
+            return (false, false);
+        }
+
+    }
+
+    if i < s.len() && (s[i] == 'e' || s[i] == 'E') {
+        i += 1;
+        opt_sign!();
+        hasfrac = digits!();
+        if !hasfrac {
+            return (false, false);
+        }
+    }
+
+    let is_number = i == s.len() && (hasint || hasfrac);
+    if is_number {
+        (true, !hasfrac)
+    } else {
+        (false, false)
+    }
+}
+
+extern crate unicode_reader;
+
+#[test]
+fn test_generic()
+{
+    use unicode_reader::CodePoints;
+
+    let mut syms = Symtab::new();
+    let hi = Datum::Sym(syms.intern("hi".to_string()));
+    let mut input = CodePoints::from("  hi".as_bytes());
+    let mut parser = Parser::new(&mut input, &mut syms);
+    assert_eq!(Datum::eqv(&parser.parse().unwrap(), &hi), true);
+    println!("there");
 }
