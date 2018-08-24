@@ -4,9 +4,32 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::str::FromStr;
 
-pub type Cons = Rc<(Datum, Datum)>;
-pub type Symbol = Rc<SymValue>;
-pub type Vector = Rc<Vec<Datum>>;
+#[derive(Clone,Debug)]
+pub struct Cons(Rc<(Datum, Datum)>);
+
+impl Cons
+{
+    pub fn car(&self) -> &Datum {
+        &(self.0).0
+    }
+
+    pub fn cdr(&self) -> &Datum {
+        &(self.0).1
+    }
+}
+
+#[derive(Clone,Debug)]
+pub struct Symbol(Rc<String>);
+
+impl Symbol
+{
+    pub fn eq(a: &Symbol, b: &Symbol) -> bool {
+        Rc::ptr_eq(&a.0, &b.0)
+    }
+}
+
+#[derive(Clone,Debug)]
+pub struct Vector(Rc<Vec<Datum>>);
 
 #[derive(Clone,Copy,Debug)]
 pub enum Number
@@ -42,20 +65,66 @@ pub enum Datum
 
 impl Datum
 {
+    pub fn is_cons(&self) -> Option<&Cons> {
+        match self {
+            Datum::Cons(ref c) => Some(c),
+            _ => None
+        }
+    }
+
+    pub fn is_number(&self) -> Option<&Number> {
+        match self {
+            Datum::Number(ref s) => Some(s),
+            _ => None
+        }
+    }
+
+    pub fn is_fix(&self) -> Option<i64> {
+        match self {
+            Datum::Number(Number::Fix(x)) => Some(*x),
+            _ => None
+        }
+    }
+
+    pub fn is_flo(&self) -> Option<f64> {
+        match self {
+            Datum::Number(Number::Flo(x)) => Some(*x),
+            _ => None
+        }
+    }
+
+    pub fn is_bool(&self) -> Option<bool> {
+        match self {
+            Datum::Bool(x) => Some(*x),
+            _ => None
+        }
+    }
+    
+    pub fn is_symbol(&self) -> Option<&Symbol> {
+        match self {
+            Datum::Sym(ref s) => Some(s),
+            _ => None
+        }
+    }
+
+    pub fn is_nil(&self) -> bool {
+        match self {
+            Datum::Nil => true,
+            _ => false
+        }
+    }
+
     pub fn eqv(a: &Datum, b:&Datum) -> bool {
         match (a, b) {
             (Datum::Nil, Datum::Nil) => true,
             (Datum::Number(ref x), Datum::Number(ref y)) => Number::equal(x, y),
             (Datum::Bool(x), Datum::Bool(y)) => x == y,
             (Datum::Chr(x), Datum::Chr(y)) => x == y,
-            (Datum::Sym(ref x), Datum::Sym(ref y)) => Rc::ptr_eq(x, y),
+            (Datum::Sym(ref x), Datum::Sym(ref y)) => Symbol::eq(x, y),
             _ => false
         }
     }
 }
-
-#[derive(Debug)]
-pub struct SymValue(String);
 
 pub struct Symtab(HashMap<String, Symbol>);
 
@@ -68,7 +137,7 @@ impl Symtab
 
     pub fn intern(&mut self, name:&str) -> Symbol {
         if let Some(s) = self.0.get(name) {
-            return Rc::clone(s);
+            return s.clone();
         }
         self.do_intern(name.to_string())
     }
@@ -76,14 +145,14 @@ impl Symtab
     pub fn intern_string(&mut self, name:String) -> Symbol
     {
         if let Some(s) = self.0.get(&name) {
-            return Rc::clone(s);
+            return s.clone();
         }
         self.do_intern(name)
     }
 
     fn do_intern(&mut self, name:String) -> Symbol {
-        let sym = Rc::new(SymValue(name.clone()));
-        self.0.insert(name, Rc::clone(&sym));
+        let sym = Symbol(Rc::new(name.clone()));
+        self.0.insert(name, sym.clone());
         sym
     }
 }
@@ -197,7 +266,7 @@ impl<'a> Parser<'a>
         }
         self.must_eat(')');
 
-        return Datum::Vector(Rc::new(data));
+        return Datum::Vector(Vector(Rc::new(data)));
     }
 
     fn parse_quote(&mut self) -> Datum
@@ -320,7 +389,7 @@ impl<'a> Parser<'a>
 
 fn cons(a: Datum, b: Datum) -> Datum
 {
-    Datum::Cons(Rc::new((a,b)))
+    Datum::Cons(Cons(Rc::new((a,b))))
 }
 
 fn is_digit(c:char) -> bool
@@ -412,9 +481,17 @@ fn test_generic()
     let mut syms = Symtab::new();
     let hi = Datum::Sym(syms.intern("hi"));
     let ho = Datum::Sym(syms.intern("ho"));
-    let mut input = CodePoints::from("  hi ho".as_bytes());
+    let mut input = CodePoints::from("  hi ho(37)".as_bytes());
     let mut parser = Parser::new(&mut input, &mut syms, true);
     assert_eq!(Datum::eqv(&parser.parse().unwrap(), &hi), true);
     assert_eq!(Datum::eqv(&parser.parse().unwrap(), &ho), true);
-    println!("there");
+    let d = &parser.parse().unwrap();
+    if let Some(c) = d.is_cons() {
+        if let Some(n) = c.car().is_fix() {
+            assert_eq!(n, 37);
+        }
+        assert_eq!(c.cdr().is_nil(), true);
+    } else {
+        panic!("Bad result {:?}", d)
+    }
 }
