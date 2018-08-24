@@ -1,8 +1,24 @@
 // Simple S-expression reader.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::rc::Rc;
 use std::str::FromStr;
+
+pub type Result = ::std::result::Result<Option<Datum>, ParseError>;
+
+#[derive(Debug)]
+pub struct ParseError {
+    msg: String,
+    line: usize
+}
+
+impl fmt::Display for ParseError
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}: Parse error: {}", self.line, &self.msg)
+    }
+}
 
 #[derive(Clone,Debug)]
 pub struct Cons(Rc<(Datum, Datum)>);
@@ -38,14 +54,21 @@ pub enum Number
     Fix(i64)
 }
 
-impl Number
+impl PartialEq for Number
 {
-    // TODO: One can argue about this, given that 1.0 != 1 due to representations...
-    pub fn equal(a: &Number, b: &Number) -> bool {
-        match (a, b) {
+    // TODO: This is wrong, given that 1.0 != 1 due to representations...
+    fn eq(&self, other: &Number) -> bool {
+        match (self, other) {
             (Number::Fix(x), Number::Fix(y)) => x == y,
             (Number::Flo(x), Number::Flo(y)) => x == y,
-            _ => false
+            (Number::Flo(x), Number::Fix(y)) => {
+                // if x is integer in range of i64 then x.as_int() == y else false
+                false
+            }
+            (Number::Fix(x), Number::Flo(y)) => {
+                // if y is integer in range of i64 then y.as_int() == x else false
+                false
+            }
         }
     }
 }
@@ -117,7 +140,7 @@ impl Datum
     pub fn eqv(a: &Datum, b:&Datum) -> bool {
         match (a, b) {
             (Datum::Nil, Datum::Nil) => true,
-            (Datum::Number(ref x), Datum::Number(ref y)) => Number::equal(x, y),
+            (Datum::Number(ref x), Datum::Number(ref y)) => x == y,
             (Datum::Bool(x), Datum::Bool(y)) => x == y,
             (Datum::Chr(x), Datum::Chr(y)) => x == y,
             (Datum::Sym(ref x), Datum::Sym(ref y)) => Symbol::eq(x, y),
@@ -163,12 +186,15 @@ pub struct Parser<'a> {
     c0: char,
     input: &'a mut Input,
     syms: &'a mut Symtab,
+    line: usize,
     allow_improper: bool,
     quote: Datum,
     dot: Datum
 }
     
 const OOB : char = '\0';
+
+type Res = ::std::result::Result<Datum, ParseError>;
 
 impl<'a> Parser<'a>
 {
@@ -180,6 +206,7 @@ impl<'a> Parser<'a>
             c0: OOB,
             input: input,
             syms: symtab,
+            line: 1,
             allow_improper,
             quote: Datum::Sym(quote_sym),
             dot: Datum::Sym(dot_sym)
@@ -188,39 +215,53 @@ impl<'a> Parser<'a>
         parser
     }
 
-    // TODO: error reporting, including line number of error.
-
-    pub fn parse(&mut self) -> Option<Datum>
+    pub fn parse(&mut self) -> Result
     {
         self.eat_whitespace_and_comment();
-        if self.peek() == OOB { None } else { Some(self.parse_datum_nodot()) }
+        if self.peek() == OOB {
+            Ok(None)
+        } else {
+            match self.parse_datum_nodot() {
+                Ok(x) => Ok(Some(x)),
+                Err(e)  => Err(e)
+            }
+        }
     }
     
+    fn fail(&self, s: &str) -> Res {
+        Err(ParseError{ msg: s.to_string(), line: self.line })
+    }
+
+    fn fails(&self, s: String) -> Res {
+        Err(ParseError{ msg: s, line: self.line })
+    }
+
     // Precondition: we have just called eat_whitespace_and_comment().
-    fn parse_datum(&mut self) -> Datum
+    fn parse_datum(&mut self) -> Res
     {
         return match self.peek() {
-            OOB  => panic!("Unexpected EOF"),
+            OOB  => self.fail("Unexpected EOF"),
             '('  => self.parse_list(),
             '#'  => self.parse_sharp(),
             '"'  => self.parse_string(),
             '\'' => self.parse_quote(),
             c if is_symbol_or_number_initial(c)
                  => self.parse_symbol_or_number(),
-            _    => panic!("Unknown character {}", self.peek())
+            _    => self.fails(format!("Unknown character {}", self.peek()))
         }
     }
 
-    fn parse_datum_nodot(&mut self) -> Datum
+    fn parse_datum_nodot(&mut self) -> Res
     {
-        let datum = self.parse_datum();
+        let datum = self.parse_datum()?;
         if Datum::eqv(&datum, &self.dot) {
-            panic!("Illegal dot symbol");
+            self.fail("Illegal dot symbol")
+        } else {
+            Ok(datum)
         }
-        datum
     }
 
-    fn parse_list(&mut self) -> Datum
+    fn parse_list(&mut self) -> Res
     {
         let mut data = vec![];
         let mut last = Datum::Nil;
@@ -231,13 +272,13 @@ impl<'a> Parser<'a>
             if self.peek() == ')' {
                 break;
             }
-            let datum = self.parse_datum();
+            let datum = self.parse_datum()?;
             if Datum::eqv(&datum, &self.dot) {
                 if !self.allow_improper {
-                    panic!("Illegal dotted pair");
+                    return self.fail("Illegal dotted pair")
                 }
                 self.eat_whitespace_and_comment();
-                last = self.parse_datum_nodot();
+                last = self.parse_datum_nodot()?;
                 self.eat_whitespace_and_comment();
                 break;
             }
@@ -249,10 +290,10 @@ impl<'a> Parser<'a>
         for d in data {
             result = cons(d, result);
         }
-        return result;
+        Ok(result)
     }
 
-    fn parse_vector(&mut self) -> Datum
+    fn parse_vector(&mut self) -> Res
     {
         let mut data = vec![];
 
@@ -262,33 +303,33 @@ impl<'a> Parser<'a>
             if self.peek() == ')' {
                 break;
             }
-            data.push(self.parse_datum_nodot());
+            data.push(self.parse_datum_nodot()?);
         }
         self.must_eat(')');
 
-        return Datum::Vector(Vector(Rc::new(data)));
+        Ok(Datum::Vector(Vector(Rc::new(data))))
     }
 
-    fn parse_quote(&mut self) -> Datum
+    fn parse_quote(&mut self) -> Res
     {
         self.must_eat('\'');
         self.eat_whitespace_and_comment();
-        let d = self.parse_datum_nodot();
-        cons(self.quote.clone(), cons(d, Datum::Nil))
+        let d = self.parse_datum_nodot()?;
+        Ok(cons(self.quote.clone(), cons(d, Datum::Nil)))
     }
 
-    fn parse_sharp(&mut self) -> Datum
+    fn parse_sharp(&mut self) -> Res
     {
         self.must_eat('#');
         match self.peek() {
-            't' =>  { self.next(); Datum::Bool(true) },
-            'f' =>  { self.next(); Datum::Bool(false) },
+            't' =>  { self.next(); Ok(Datum::Bool(true)) },
+            'f' =>  { self.next(); Ok(Datum::Bool(false)) },
             '(' =>  { self.parse_vector() }
-            _   =>  { panic!("Bad sharp sequence"); }
+            _   =>  { self.fail("Bad sharp sequence") }
         }
     }
 
-    fn parse_string(&mut self) -> Datum
+    fn parse_string(&mut self) -> Res
     {
         self.must_eat('"');
         let mut s = String::new();
@@ -299,19 +340,19 @@ impl<'a> Parser<'a>
                         'n' => '\n',
                         'r' => '\r',
                         't' => '\t',
-                        OOB => { panic!("EOF in string"); },
+                        OOB => { return self.fail("EOF in string") },
                         c   => c
                     })
                 }
                 '"'  => { break; }
-                OOB  => { panic!("EOF in string") }
+                OOB  => { return self.fail("EOF in string") }
                 c    => { s.push(c); }
             }
         }
-        Datum::Str(s)
+        Ok(Datum::Str(s))
     }
 
-    fn parse_symbol_or_number(&mut self) -> Datum
+    fn parse_symbol_or_number(&mut self) -> Res
     {
         let mut name = Vec::new();
         name.push(self.get());
@@ -322,12 +363,12 @@ impl<'a> Parser<'a>
         let name_str: String = name.into_iter().collect();
         if is_number {
             if is_integer {
-                Datum::Number(Number::Fix(i64::from_str(&name_str).unwrap())) // TODO: Range error?
+                Ok(Datum::Number(Number::Fix(i64::from_str(&name_str).unwrap()))) // TODO: Range error?
             } else {
-                Datum::Number(Number::Flo(f64::from_str(&name_str).unwrap())) // TODO: Range error?
+                Ok(Datum::Number(Number::Flo(f64::from_str(&name_str).unwrap()))) // TODO: Range error?
             }
         } else {
-            Datum::Sym(self.syms.intern_string(name_str))
+            Ok(Datum::Sym(self.syms.intern_string(name_str)))
         }
     }
 
@@ -335,8 +376,16 @@ impl<'a> Parser<'a>
     {
         loop {
             match self.peek() {
-                ' ' | '\t' | '\r' | '\n'
+                ' ' | '\t'
                     => { self.next(); }
+                '\r'
+                    => { self.line += 1; self.next();
+                         if self.peek() == '\n' {
+                             self.next();
+                         }
+                       }
+                '\n'
+                    => { self.line += 1; self.next(); }
                 ';'
                     => { self.next();
                          loop {
@@ -483,9 +532,9 @@ fn test_generic()
     let ho = Datum::Sym(syms.intern("ho"));
     let mut input = CodePoints::from("  hi ho(37)".as_bytes());
     let mut parser = Parser::new(&mut input, &mut syms, true);
-    assert_eq!(Datum::eqv(&parser.parse().unwrap(), &hi), true);
-    assert_eq!(Datum::eqv(&parser.parse().unwrap(), &ho), true);
-    let d = &parser.parse().unwrap();
+    assert_eq!(Datum::eqv(&parser.parse().unwrap().unwrap(), &hi), true);
+    assert_eq!(Datum::eqv(&parser.parse().unwrap().unwrap(), &ho), true);
+    let d = &parser.parse().unwrap().unwrap();
     if let Some(c) = d.is_cons() {
         if let Some(n) = c.car().is_fix() {
             assert_eq!(n, 37);
