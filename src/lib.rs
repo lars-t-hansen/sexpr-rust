@@ -4,35 +4,48 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::str::FromStr;
 
-// TODO: very likely, Pair wants to be Rc<> and Vector wants to have
-// Rc<> wrapped around it, so that it's possible to create DAGs /
-// share data in various ways when processing the s-expression.
-
-pub type Pair = Box<(Datum, Datum)>;
+pub type Cons = Rc<(Datum, Datum)>;
 pub type Symbol = Rc<SymValue>;
+pub type Vector = Rc<Vec<Datum>>;
+
+#[derive(Clone,Copy,Debug)]
+pub enum Number
+{
+    Flo(f64),
+    Fix(i64)
+}
+
+impl Number
+{
+    // TODO: One can argue about this, given that 1.0 != 1 due to representations...
+    pub fn equal(a: &Number, b: &Number) -> bool {
+        match (a, b) {
+            (Number::Fix(x), Number::Fix(y)) => x == y,
+            (Number::Flo(x), Number::Flo(y)) => x == y,
+            _ => false
+        }
+    }
+}
 
 #[derive(Clone,Debug)]
 pub enum Datum
 {
-    Cons(Pair),
-    Flo(f64),
-    Fix(i64),
+    Cons(Cons),
+    Number(Number),
     Bool(bool),
     Str(String),
     Sym(Symbol),
     Chr(char),
-    Vector(Vec<Datum>),
+    Vector(Vector),
     Nil
 }
 
-impl Datum {
-    // TODO: One can argue about this, given that 1.0 != 1 due to representations...
-    
+impl Datum
+{
     pub fn eqv(a: &Datum, b:&Datum) -> bool {
         match (a, b) {
             (Datum::Nil, Datum::Nil) => true,
-            (Datum::Flo(x), Datum::Flo(y)) => x == y,
-            (Datum::Fix(x), Datum::Fix(y)) => x == y,
+            (Datum::Number(ref x), Datum::Number(ref y)) => Number::equal(x, y),
             (Datum::Bool(x), Datum::Bool(y)) => x == y,
             (Datum::Chr(x), Datum::Chr(y)) => x == y,
             (Datum::Sym(ref x), Datum::Sym(ref y)) => Rc::ptr_eq(x, y),
@@ -42,82 +55,76 @@ impl Datum {
 }
 
 #[derive(Debug)]
-pub struct SymValue
-{
-    name: String
-}
+pub struct SymValue(String);
 
-pub struct Symtab
-{
-    table:     HashMap<String, Symbol>,
-    pub quote: Datum,
-    pub dot:   Datum
-}
+pub struct Symtab(HashMap<String, Symbol>);
 
 impl Symtab
 {
     pub fn new() -> Symtab
     {
-        let mut table = HashMap::new();
-
-        let quote_sym = Rc::new(SymValue { name: "quote".to_string() });
-        table.insert(quote_sym.name.clone(), Rc::clone(&quote_sym));
-
-        let dot_sym = Rc::new(SymValue { name: ".".to_string() });
-        table.insert(dot_sym.name.clone(), Rc::clone(&dot_sym));
-
-        Symtab {
-            table:   table,
-            quote:   Datum::Sym(quote_sym),
-            dot:     Datum::Sym(dot_sym)
-        }
+        Symtab(HashMap::new())
     }
 
-    pub fn intern(&mut self, name:String) -> Symbol
-    {
-        if let Some(s) = self.table.get(&name) {
+    pub fn intern(&mut self, name:&str) -> Symbol {
+        if let Some(s) = self.0.get(name) {
             return Rc::clone(s);
         }
+        self.do_intern(name.to_string())
+    }
 
-        let sym = Rc::new(SymValue { name: name.clone() });
-        self.table.insert(name, Rc::clone(&sym));
+    pub fn intern_string(&mut self, name:String) -> Symbol
+    {
+        if let Some(s) = self.0.get(&name) {
+            return Rc::clone(s);
+        }
+        self.do_intern(name)
+    }
+
+    fn do_intern(&mut self, name:String) -> Symbol {
+        let sym = Rc::new(SymValue(name.clone()));
+        self.0.insert(name, Rc::clone(&sym));
         sym
     }
 }
-
-// TODO: allow user to control whether dotted pairs is a thing, for
-// some applications they are not desirable.  In this case, the dot
-// syntax should be recognized but rejected.
-//
-// TODO: error reporting, including line number of error.
 
 pub type Input = Iterator<Item = std::io::Result<char>>;
 
 pub struct Parser<'a> {
     c0: char,
     input: &'a mut Input,
-    syms: &'a mut Symtab
+    syms: &'a mut Symtab,
+    allow_improper: bool,
+    quote: Datum,
+    dot: Datum
 }
     
 const OOB : char = '\0';
 
 impl<'a> Parser<'a>
 {
-    pub fn new(input: &'a mut Input, symtab: &'a mut Symtab) -> Parser<'a>
+    pub fn new(input: &'a mut Input, symtab: &'a mut Symtab, allow_improper: bool) -> Parser<'a>
     {
+        let quote_sym = symtab.intern("quote");
+        let dot_sym = symtab.intern(".");
         let mut parser = Parser {
             c0: OOB,
             input: input,
-            syms: symtab
+            syms: symtab,
+            allow_improper,
+            quote: Datum::Sym(quote_sym),
+            dot: Datum::Sym(dot_sym)
         };
         parser.next();
         parser
     }
 
+    // TODO: error reporting, including line number of error.
+
     pub fn parse(&mut self) -> Option<Datum>
     {
         self.eat_whitespace_and_comment();
-        if self.peek() == OOB { None } else { Some(self.parse_datum()) }
+        if self.peek() == OOB { None } else { Some(self.parse_datum_nodot()) }
     }
     
     // Precondition: we have just called eat_whitespace_and_comment().
@@ -135,6 +142,15 @@ impl<'a> Parser<'a>
         }
     }
 
+    fn parse_datum_nodot(&mut self) -> Datum
+    {
+        let datum = self.parse_datum();
+        if Datum::eqv(&datum, &self.dot) {
+            panic!("Illegal dot symbol");
+        }
+        datum
+    }
+
     fn parse_list(&mut self) -> Datum
     {
         let mut data = vec![];
@@ -147,9 +163,12 @@ impl<'a> Parser<'a>
                 break;
             }
             let datum = self.parse_datum();
-            if Datum::eqv(&datum, &self.syms.dot) {
+            if Datum::eqv(&datum, &self.dot) {
+                if !self.allow_improper {
+                    panic!("Illegal dotted pair");
+                }
                 self.eat_whitespace_and_comment();
-                last = self.parse_datum();
+                last = self.parse_datum_nodot();
                 self.eat_whitespace_and_comment();
                 break;
             }
@@ -174,19 +193,19 @@ impl<'a> Parser<'a>
             if self.peek() == ')' {
                 break;
             }
-            data.push(self.parse_datum());
+            data.push(self.parse_datum_nodot());
         }
         self.must_eat(')');
 
-        return Datum::Vector(data);
+        return Datum::Vector(Rc::new(data));
     }
 
     fn parse_quote(&mut self) -> Datum
     {
         self.must_eat('\'');
         self.eat_whitespace_and_comment();
-        let d = self.parse_datum();
-        cons(self.syms.quote.clone(), cons(d, Datum::Nil))
+        let d = self.parse_datum_nodot();
+        cons(self.quote.clone(), cons(d, Datum::Nil))
     }
 
     fn parse_sharp(&mut self) -> Datum
@@ -234,12 +253,12 @@ impl<'a> Parser<'a>
         let name_str: String = name.into_iter().collect();
         if is_number {
             if is_integer {
-                Datum::Fix(i64::from_str(&name_str).unwrap()) // Range error?
+                Datum::Number(Number::Fix(i64::from_str(&name_str).unwrap())) // TODO: Range error?
             } else {
-                Datum::Flo(f64::from_str(&name_str).unwrap()) // Range error?
+                Datum::Number(Number::Flo(f64::from_str(&name_str).unwrap())) // TODO: Range error?
             }
         } else {
-            Datum::Sym(self.syms.intern(name_str))
+            Datum::Sym(self.syms.intern_string(name_str))
         }
     }
 
@@ -301,7 +320,7 @@ impl<'a> Parser<'a>
 
 fn cons(a: Datum, b: Datum) -> Datum
 {
-    Datum::Cons(Box::new((a,b)))
+    Datum::Cons(Rc::new((a,b)))
 }
 
 fn is_digit(c:char) -> bool
@@ -364,7 +383,6 @@ fn is_number_syntax(s:&Vec<char>) -> (bool, bool)
         if !hasfrac {
             return (false, false);
         }
-
     }
 
     if i < s.len() && (s[i] == 'e' || s[i] == 'E') {
@@ -392,9 +410,11 @@ fn test_generic()
     use unicode_reader::CodePoints;
 
     let mut syms = Symtab::new();
-    let hi = Datum::Sym(syms.intern("hi".to_string()));
-    let mut input = CodePoints::from("  hi".as_bytes());
-    let mut parser = Parser::new(&mut input, &mut syms);
+    let hi = Datum::Sym(syms.intern("hi"));
+    let ho = Datum::Sym(syms.intern("ho"));
+    let mut input = CodePoints::from("  hi ho".as_bytes());
+    let mut parser = Parser::new(&mut input, &mut syms, true);
     assert_eq!(Datum::eqv(&parser.parse().unwrap(), &hi), true);
+    assert_eq!(Datum::eqv(&parser.parse().unwrap(), &ho), true);
     println!("there");
 }
