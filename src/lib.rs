@@ -1,6 +1,7 @@
-// Simple S-expression reader.
+// Simple S-expression reader library.
 
 use std::collections::HashMap;
+use std::error::Error;
 use std::fmt;
 use std::rc::Rc;
 use std::str::FromStr;
@@ -9,14 +10,24 @@ pub type Result = ::std::result::Result<Option<Datum>, ParseError>;
 
 #[derive(Debug)]
 pub struct ParseError {
-    msg: String,
-    line: usize
+    pub msg: String,
+    pub line: usize
 }
 
 impl fmt::Display for ParseError
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}: Parse error: {}", self.line, &self.msg)
+    }
+}
+
+impl Error for ParseError
+{
+    fn description(&self) -> &str {
+        &self.msg
+    }
+    fn cause(&self) -> Option<&Error> {
+        None                    // This could be the io error when appropriate
     }
 }
 
@@ -61,11 +72,11 @@ impl PartialEq for Number
         match (self, other) {
             (Number::Fix(x), Number::Fix(y)) => x == y,
             (Number::Flo(x), Number::Flo(y)) => x == y,
-            (Number::Flo(x), Number::Fix(y)) => {
+            (Number::Flo(_x), Number::Fix(_y)) => {
                 // if x is integer in range of i64 then x.as_int() == y else false
                 false
             }
-            (Number::Fix(x), Number::Flo(y)) => {
+            (Number::Fix(_x), Number::Flo(_y)) => {
                 // if y is integer in range of i64 then y.as_int() == x else false
                 false
             }
@@ -74,66 +85,43 @@ impl PartialEq for Number
 }
 
 #[derive(Clone,Debug)]
+pub struct List(Rc<Vec<Datum>>);
+
+const UNDEFINED:Datum = Datum::Undefined;
+
+impl List
+{
+    pub fn at(&self, n:usize) -> &Datum {
+        if n < self.0.len() {
+            &self.0[n]
+        } else {
+            &UNDEFINED
+        }
+    }
+}
+
+#[derive(Clone,Debug)]
 pub enum Datum
 {
     Cons(Cons),
+    Nil,
+    List(List),
+    Undefined,
     Number(Number),
     Bool(bool),
     Str(String),
     Sym(Symbol),
     Chr(char),
     Vector(Vector),
-    Nil
 }
 
 impl Datum
 {
-    pub fn is_cons(&self) -> Option<&Cons> {
-        match self {
-            Datum::Cons(ref c) => Some(c),
-            _ => None
-        }
-    }
-
-    pub fn is_number(&self) -> Option<&Number> {
-        match self {
-            Datum::Number(ref s) => Some(s),
-            _ => None
-        }
-    }
-
-    pub fn is_fix(&self) -> Option<i64> {
-        match self {
-            Datum::Number(Number::Fix(x)) => Some(*x),
-            _ => None
-        }
-    }
-
-    pub fn is_flo(&self) -> Option<f64> {
-        match self {
-            Datum::Number(Number::Flo(x)) => Some(*x),
-            _ => None
-        }
-    }
-
-    pub fn is_bool(&self) -> Option<bool> {
-        match self {
-            Datum::Bool(x) => Some(*x),
-            _ => None
-        }
-    }
-    
-    pub fn is_symbol(&self) -> Option<&Symbol> {
-        match self {
-            Datum::Sym(ref s) => Some(s),
-            _ => None
-        }
-    }
-
-    pub fn is_nil(&self) -> bool {
-        match self {
-            Datum::Nil => true,
-            _ => false
+    pub fn eq_sym(&self, s:&Symbol) -> bool {
+        if let Datum::Sym(ref x) = self {
+            Symbol::eq(x, s)
+        } else {
+            false
         }
     }
 
@@ -187,7 +175,7 @@ pub struct Parser<'a> {
     input: &'a mut Input,
     syms: &'a mut Symtab,
     line: usize,
-    allow_improper: bool,
+    use_cons: bool,
     quote: Datum,
     dot: Datum
 }
@@ -198,7 +186,11 @@ type Res = ::std::result::Result<Datum, ParseError>;
 
 impl<'a> Parser<'a>
 {
-    pub fn new(input: &'a mut Input, symtab: &'a mut Symtab, allow_improper: bool) -> Parser<'a>
+    /// If `use_cons` is true then lists allow dotted pairs, and will
+    /// be represented by Cons values.  Otherwise, lists are
+    /// represented by List values, which are really vectors.
+
+    pub fn new(input: &'a mut Input, symtab: &'a mut Symtab, use_cons: bool) -> Parser<'a>
     {
         let quote_sym = symtab.intern("quote");
         let dot_sym = symtab.intern(".");
@@ -207,7 +199,7 @@ impl<'a> Parser<'a>
             input: input,
             syms: symtab,
             line: 1,
-            allow_improper,
+            use_cons,
             quote: Datum::Sym(quote_sym),
             dot: Datum::Sym(dot_sym)
         };
@@ -274,7 +266,7 @@ impl<'a> Parser<'a>
             }
             let datum = self.parse_datum()?;
             if Datum::eqv(&datum, &self.dot) {
-                if !self.allow_improper {
+                if !self.use_cons {
                     return self.fail("Illegal dotted pair")
                 }
                 self.eat_whitespace_and_comment();
@@ -286,11 +278,15 @@ impl<'a> Parser<'a>
         }
         self.must_eat(')');
 
-        let mut result = last;
-        for d in data {
-            result = cons(d, result);
+        if self.use_cons {
+            let mut result = last;
+            for d in data {
+                result = cons(d, result);
+            }
+            Ok(result)
+        } else {
+            Ok(Datum::List(List(Rc::new(data))))
         }
-        Ok(result)
     }
 
     fn parse_vector(&mut self) -> Res
@@ -535,11 +531,11 @@ fn test_generic()
     assert_eq!(Datum::eqv(&parser.parse().unwrap().unwrap(), &hi), true);
     assert_eq!(Datum::eqv(&parser.parse().unwrap().unwrap(), &ho), true);
     let d = &parser.parse().unwrap().unwrap();
-    if let Some(c) = d.is_cons() {
-        if let Some(n) = c.car().is_fix() {
-            assert_eq!(n, 37);
+    if let Datum::Cons(ref c) = d {
+        if let Datum::Number(ref n) = c.car() {
+            assert_eq!(n == &Number::Fix(37), true);
         }
-        assert_eq!(c.cdr().is_nil(), true);
+        assert_eq!(if let Datum::Nil = c.cdr() { true } else { false }, true);
     } else {
         panic!("Bad result {:?}", d)
     }
